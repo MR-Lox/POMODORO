@@ -24,6 +24,19 @@
 #include <WebServer.h>
 #include "boot_bitmap.h"  // bitmap boot screen 61x31
 
+// Polices Adafruit GFX
+#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSansBold9pt7b.h>
+#include <Fonts/FreeSansBold12pt7b.h>
+#include <Fonts/FreeSansBoldOblique12pt7b.h>
+#include <Fonts/FreeMono9pt7b.h>
+#include <Fonts/FreeSerif9pt7b.h>
+#include <Fonts/FreeSerifBold12pt7b.h>
+#include <Fonts/FreeSerifBoldItalic9pt7b.h>
+#include <Fonts/Org_01.h>
+#include <Fonts/TomThumb.h>
+#include <Fonts/Picopixel.h>
+
 // =====================
 // PINS & HARDWARE
 // =====================
@@ -80,6 +93,7 @@ struct Config {
   uint8_t  brightness;    // 0-255
   float    pulseMin;      // facteur min pulse (ex: 0.3)
   float    pulseMax;      // facteur max pulse (ex: 1.0)
+  uint8_t  fontIndex;     // index police sélectionnée
 };
 
 Config cfg;
@@ -92,7 +106,8 @@ const Config cfgDefault = {
   FX_RAINBOW,                               // effet fin
   100,                                      // luminosité
   0.3f,                                     // pulseMin
-  1.0f                                      // pulseMax
+  1.0f,                                     // pulseMax
+  0                                         // fontIndex (0 = builtin)
 };
 
 // =====================
@@ -143,7 +158,8 @@ enum MenuState {
   MENU_COLOR_BREAK,
   MENU_COLOR_SET,
   MENU_FX,          // choix effet fin
-  MENU_BRIGHT       // luminosité
+  MENU_BRIGHT,      // luminosité
+  MENU_FONT         // choix police
 };
 
 MenuState menuState  = MENU_NONE;
@@ -157,10 +173,11 @@ const char* mainMenuItems[] = {
   "Couleur Config",
   "Effet fin",
   "Luminosite",
+  "Police",
   "Web portal",
   "Retour"
 };
-const int MAIN_MENU_COUNT = 7;
+const int MAIN_MENU_COUNT = 8;
 
 // Couleurs prédéfinies pour le menu couleur
 const uint32_t presetColors[] = {
@@ -185,6 +202,64 @@ const char* fxNames[] = {
   "Aucun", "Arc-en-ciel", "Flash", "Comete", "Respiration"
 };
 const int FX_COUNT = 5;
+
+// =====================
+// POLICES
+// =====================
+#define FONT_COUNT 12
+
+const char* fontNames[FONT_COUNT] = {
+  "Builtin",           // 0
+  "FreeSans 9",        // 1
+  "FreeSansBold 9",    // 2
+  "FreeSansBold 12",   // 3
+  "FreeSansBoldObl 12",// 4
+  "FreeMono 9",        // 5
+  "FreeSerif 9",       // 6
+  "FreeSerifBold 12",  // 7
+  "FreeSerifBoldIt 9", // 8
+  "Org_01",            // 9
+  "TomThumb",          // 10
+  "Picopixel"          // 11
+};
+
+// Taille setTextSize à utiliser avec chaque police
+// (les GFX custom ignorent setTextSize, mais on garde 1 pour cohérence)
+// Taille fixe par police — calibrée pour que chaque police remplisse
+// l'écran avec les mêmes proportions que la Builtin x4
+// Objectif : "00:00" dans ~100px large x 35px haut
+const uint8_t fontTextSize[FONT_COUNT] = {
+  4,  //  0  Builtin           → référence
+  2,  //  1  FreeSans 9pt      → 47*2=94px large, 26px haut
+  2,  //  2  FreeSansBold 9pt  → 49*2=98px large, 26px haut
+  2,  //  3  FreeSansBold 12pt → 62*2=124px large, 34px haut
+  2,  //  4  FreeSansBoldObl12 → idem
+  2,  //  5  FreeMono 9pt      → 50*2=100px large, 26px haut
+  2,  //  6  FreeSerif 9pt     → 45*2=90px large, 28px haut
+  2,  //  7  FreeSerifBold 12pt→ 60*2=120px large, 36px haut
+  2,  //  8  FreeSerifBoldIt 9 → 47*2=94px large, 28px haut
+  4,  //  9  Org_01            → 30*4=120px large, 24px haut (pixel art net)
+  5,  // 10  TomThumb          → 21*5=105px large, 25px haut
+  5   // 11  Picopixel         → 19*5=95px large, 20px haut
+};
+
+// Retourne le pointeur GFXfont (nullptr = police builtin)
+const GFXfont* getFont(uint8_t idx) {
+  switch(idx) {
+    case  1: return &FreeSans9pt7b;
+    case  2: return &FreeSansBold9pt7b;
+    case  3: return &FreeSansBold12pt7b;
+    case  4: return &FreeSansBoldOblique12pt7b;
+    case  5: return &FreeMono9pt7b;
+    case  6: return &FreeSerif9pt7b;
+    case  7: return &FreeSerifBold12pt7b;
+    case  8: return &FreeSerifBoldItalic9pt7b;
+    case  9: return &Org_01;
+    case 10: return &TomThumb;
+    case 11: return &Picopixel;
+    default: return nullptr; // builtin
+  }
+}
 
 // =====================
 // ENCODEUR / BOUTON
@@ -227,6 +302,51 @@ void showCreditsScreen();
 void initStars();
 void updateStars();
 bool checkEasterEgg();
+void flashConfirm();
+// ======================
+// FEEDBACK VALIDATION
+// Flash vert sur le ruban LED + coche sur l'OLED
+// ======================
+void flashConfirm()
+{
+  // --- Ruban LED : flash vert 2 fois ---
+  for (int f = 0; f < 2; f++) {
+    for (int i = 0; i < LED_COUNT; i++)
+      strip.setPixelColor(i, strip.Color(0, 255, 0)); // vert pur
+    strip.show();
+    delay(80);
+    strip.clear();
+    strip.show();
+    delay(60);
+  }
+
+  // --- OLED : coche centrée x3 ---
+  display.clearDisplay();
+
+  int cx = SCREEN_WIDTH  / 2; // 64
+  int cy = 20;                 // un peu au dessus du centre pour laisser place au texte
+
+  // Coche dessinée avec drawLine épaisse (x3 : segments de 3px)
+  // Trait gauche : descend vers le bas-droite
+  for (int t = 0; t < 3; t++) {
+    for (int i = 0; i < 10; i++)
+      display.drawPixel(cx - 14 + i + t, cy + i, SSD1306_WHITE);
+  }
+  // Trait droit : remonte vers le haut-droite
+  for (int t = 0; t < 3; t++) {
+    for (int i = 0; i < 18; i++)
+      display.drawPixel(cx - 4 + i + t, cy + 9 - i, SSD1306_WHITE);
+  }
+
+  // "OK !" en taille 2 sous la coche
+  display.setFont(nullptr);
+  display.setTextSize(2);
+  display.setCursor(cx - 18, cy + 22);
+  display.print("OK !");
+
+  display.display();
+  delay(500);
+}
 
 // ======================
 // SETUP
@@ -310,6 +430,7 @@ void loadConfig()
   cfg.brightness = prefs.getUChar("bright",  cfgDefault.brightness);
   cfg.pulseMin   = prefs.getFloat("pulseMin",cfgDefault.pulseMin);
   cfg.pulseMax   = prefs.getFloat("pulseMax",cfgDefault.pulseMax);
+  cfg.fontIndex  = prefs.getUChar("fontIdx", cfgDefault.fontIndex);
   prefs.end();
 }
 
@@ -323,6 +444,7 @@ void saveConfig()
   prefs.putUChar("bright",  cfg.brightness);
   prefs.putFloat("pulseMin",cfg.pulseMin);
   prefs.putFloat("pulseMax",cfg.pulseMax);
+  prefs.putUChar("fontIdx", cfg.fontIndex);
   prefs.end();
 }
 
@@ -510,19 +632,25 @@ void drawScreen()
   }
 
   String timeStr = formatDuration(remainingSeconds);
-  display.setTextSize(4);
+
+  // Appliquer la police choisie
+  const GFXfont* fnt = getFont(cfg.fontIndex);
+  display.setFont(fnt);
+  display.setTextSize(fontTextSize[cfg.fontIndex]);
 
   int16_t x1, y1;
   uint16_t w, h;
   display.getTextBounds(timeStr, 0, 0, &x1, &y1, &w, &h);
 
-  int x = (SCREEN_WIDTH  - w) / 2;
-  int y = (SCREEN_HEIGHT - h) / 2;
+  // Centrage adapté : les polices GFX custom ont une baseline différente
+  int x = (SCREEN_WIDTH  - w) / 2 - x1;
+  int y = (SCREEN_HEIGHT - h) / 2 - y1;
 
   display.setCursor(x, y);
   display.print(timeStr);
 
-  // Indicateur de mode en haut à gauche (petit)
+  // Indicateur de mode en haut à gauche (police builtin taille 1)
+  display.setFont(nullptr);
   display.setTextSize(1);
   display.setCursor(0, 0);
   if      (mode == MODE_WORK)  display.print("WORK");
@@ -541,6 +669,13 @@ void enterMenu(MenuState s)
   menuIndex = 0;
   menuEnterEncoder = -encoder.read() / 4;
   lastEncoderPos   = menuEnterEncoder;
+
+  // LEDs couleur "config" pendant toute la navigation dans les menus
+  // (sauf menus couleur/FX qui ont leur propre preview)
+  if (s == MENU_MAIN || s == MENU_BRIGHT || s == MENU_FONT) {
+    previewColorOnStrip(cfg.colorSet);
+  }
+
   drawMenu();
 }
 
@@ -563,13 +698,16 @@ void menuNavigate(int delta)
     case MENU_COLOR_BREAK:
     case MENU_COLOR_SET:   maxItems = PRESET_COLOR_COUNT; break;
     case MENU_FX:          maxItems = FX_COUNT;          break;
-    case MENU_BRIGHT:      
+    case MENU_BRIGHT:
       cfg.brightness = constrain((int)cfg.brightness + delta * 10, 10, 255);
       strip.setBrightness(cfg.brightness);
-      // Preview couleur selon mode courant
       previewColorOnStrip(mode == MODE_WORK ? cfg.colorWork :
                           mode == MODE_BREAK ? cfg.colorBreak : cfg.colorSet);
       drawMenu();
+      return;
+    case MENU_FONT:
+      cfg.fontIndex = (cfg.fontIndex + delta + FONT_COUNT) % FONT_COUNT;
+      drawMenu(); // preview sur l'écran OLED
       return;
     default: break;
   }
@@ -601,9 +739,11 @@ void menuSelect()
         case 2: enterMenu(MENU_COLOR_SET);   break;
         case 3: enterMenu(MENU_FX);          break;
         case 4: enterMenu(MENU_BRIGHT);      break;
-        case 5:
+        case 5: enterMenu(MENU_FONT);        break;
+        case 6:
           // Afficher infos portail web
           display.clearDisplay();
+          display.setFont(nullptr);
           display.setTextSize(1);
           display.setCursor(0, 0);
           display.print("WiFi: ");
@@ -616,29 +756,39 @@ void menuSelect()
           delay(3000);
           drawMenu();
           break;
-        case 6: exitMenu(); break;
+        case 7: exitMenu(); break;
       }
       break;
 
     case MENU_COLOR_WORK:
       cfg.colorWork = presetColors[menuIndex];
+      flashConfirm();
       enterMenu(MENU_MAIN);
       break;
     case MENU_COLOR_BREAK:
       cfg.colorBreak = presetColors[menuIndex];
+      flashConfirm();
       enterMenu(MENU_MAIN);
       break;
     case MENU_COLOR_SET:
       cfg.colorSet = presetColors[menuIndex];
+      flashConfirm();
       enterMenu(MENU_MAIN);
       break;
 
     case MENU_FX:
       cfg.fxEnd = menuIndex;
+      flashConfirm();
       enterMenu(MENU_MAIN);
       break;
 
     case MENU_BRIGHT:
+      flashConfirm();
+      enterMenu(MENU_MAIN);
+      break;
+
+    case MENU_FONT:
+      flashConfirm();
       enterMenu(MENU_MAIN);
       break;
 
@@ -708,12 +858,41 @@ void drawMenu()
       display.print("Valeur : ");
       display.print((int)((cfg.brightness / 255.0f) * 100));
       display.print("%");
-      // Barre de progression
       int barW = (int)((cfg.brightness / 255.0f) * 116);
       display.drawRect(6, 36, 116, 10, SSD1306_WHITE);
       display.fillRect(6, 36, barW, 10, SSD1306_WHITE);
       display.setCursor(0, 52);
       display.print("Tourner = ajuster");
+      break;
+    }
+
+    case MENU_FONT: {
+      // Titre en police builtin
+      display.setFont(nullptr);
+      display.setTextSize(1);
+      display.setCursor(0, 0);
+      display.print("Police : ");
+      display.print(fontNames[cfg.fontIndex]);
+      display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+      // Preview : afficher "12:34" avec la police sélectionnée, centré
+      const GFXfont* prevFont = getFont(cfg.fontIndex);
+      display.setFont(prevFont);
+      display.setTextSize(fontTextSize[cfg.fontIndex]);
+
+      String preview = "12:34";
+      int16_t bx, by; uint16_t bw, bh;
+      display.getTextBounds(preview, 0, 0, &bx, &by, &bw, &bh);
+      int px = (SCREEN_WIDTH  - bw) / 2 - bx;
+      int py = 12 + (50 - bh) / 2 - by; // zone y 12→62
+      display.setCursor(px, py);
+      display.print(preview);
+
+      // Revenir builtin pour l'instruction bas
+      display.setFont(nullptr);
+      display.setTextSize(1);
+      display.setCursor(2, 56);
+      display.print("< tourner  valider >");
       break;
     }
 
@@ -1039,17 +1218,14 @@ void showCreditsScreen()
     "Code original",
     "  WILLAU",
     "",
-    "Update & design",
+    "  Update",
+    "    &",
+    "new features",
     "  _n3o_",
-    "",
-    "Built with",
-    "  ESP32-C3",
-    "  NeoPixel",
-    "  SSD1306",
     "",
     "Made with <3",
   };
-  const int LINE_COUNT = 13;
+  const int LINE_COUNT = 10;
 
   int y0 = 18 - scrollOffset;
   for (int i = 0; i < LINE_COUNT; i++) {
@@ -1116,7 +1292,7 @@ void handleWebRoot()
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Timer Config</title>
+<title>POMODOROX Timer Config</title>
 <style>
   body { font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 16px; background: #111; color: #eee; }
   h1   { color: #fff; font-size: 1.4em; margin-bottom: 4px; }
@@ -1135,7 +1311,7 @@ void handleWebRoot()
 </style>
 </head>
 <body>
-<h1>&#9201; Timer Config</h1>
+<h1>&#9201; POMODOROX Timer Config</h1>
 
 <form method="POST" action="/save" id="form">
 
@@ -1217,6 +1393,27 @@ void handleWebRoot()
   html += R"rawhtml(%</span>
 </div>
 
+<h2>Police d'affichage</h2>
+<select name="fontIndex" id="fontSel" onchange="updateFontPreview()">
+  <option value="0">Builtin</option>
+  <option value="1">FreeSans 9pt</option>
+  <option value="2">FreeSansBold 9pt</option>
+  <option value="3">FreeSansBold 12pt</option>
+  <option value="4">FreeSansBoldOblique 12pt</option>
+  <option value="5">FreeMono 9pt</option>
+  <option value="6">FreeSerif 9pt</option>
+  <option value="7">FreeSerifBold 12pt</option>
+  <option value="8">FreeSerifBoldItalic 9pt</option>
+  <option value="9">Org_01 (pixel)</option>
+  <option value="10">TomThumb (micro)</option>
+  <option value="11">Picopixel (micro)</option>
+</select>
+
+<div id="fontPreview" style="margin:12px 0;background:#000;border-radius:8px;padding:8px;text-align:center;border:1px solid #333;">
+  <canvas id="oledCanvas" width="128" height="64" style="image-rendering:pixelated;width:256px;height:128px;display:block;margin:0 auto;"></canvas>
+  <div style="font-size:11px;color:#666;margin-top:4px;">Preview OLED 128x64 (x2)</div>
+</div>
+
 <button type="submit">&#128190; Enregistrer</button>
 </form>
 
@@ -1230,6 +1427,52 @@ if (params.get('saved') === '1') {
   d.style.display = 'block';
   setTimeout(() => d.style.display = 'none', 3000);
 }
+
+// ── Police & preview OLED ──
+const FONT_IDX = )rawhtml";
+  html += String(cfg.fontIndex);
+  html += R"rawhtml(;
+document.getElementById('fontSel').value = FONT_IDX;
+
+const FONTS = [
+  { name:'Builtin',    family:'monospace',      size:28, weight:'900' },
+  { name:'FreeSans9',  family:'sans-serif',     size:14, weight:'400' },
+  { name:'FreeSansBold9', family:'sans-serif',  size:14, weight:'700' },
+  { name:'FreeSansBold12',family:'sans-serif',  size:18, weight:'700' },
+  { name:'FreeSansBoldObl12',family:'sans-serif',size:18,weight:'700',style:'italic' },
+  { name:'FreeMono9',  family:'monospace',      size:14, weight:'400' },
+  { name:'FreeSerif9', family:'serif',          size:14, weight:'400' },
+  { name:'FreeSerifBold12',family:'serif',      size:18, weight:'700' },
+  { name:'FreeSerifBoldIt9',family:'serif',     size:14, weight:'700',style:'italic' },
+  { name:'Org_01',     family:'"Courier New"',  size:9,  weight:'400' },
+  { name:'TomThumb',   family:'monospace',      size:7,  weight:'400' },
+  { name:'Picopixel',  family:'monospace',      size:6,  weight:'400' }
+];
+
+function updateFontPreview() {
+  const idx = parseInt(document.getElementById('fontSel').value);
+  const f   = FONTS[idx];
+  const canvas = document.getElementById('oledCanvas');
+  const ctx    = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, 128, 64);
+  ctx.fillStyle = '#fff';
+  ctx.font = (f.style||'normal') + ' ' + f.weight + ' ' + f.size + 'px ' + f.family;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('12:34', 64, 38);
+  // label mode
+  ctx.font = '400 6px monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText('WORK', 0, 0);
+  // nom police
+  ctx.fillStyle = '#555';
+  ctx.font = '400 5px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(f.name, 64, 58);
+}
+updateFontPreview();
 </script>
 </body>
 </html>
@@ -1247,6 +1490,7 @@ void handleWebSave()
   if (server.hasArg("brightness")) cfg.brightness = constrain(server.arg("brightness").toInt(), 10, 255);
   if (server.hasArg("pulseMin"))   cfg.pulseMin   = constrain(server.arg("pulseMin").toInt(), 0, 100) / 100.0f;
   if (server.hasArg("pulseMax"))   cfg.pulseMax   = constrain(server.arg("pulseMax").toInt(), 0, 100) / 100.0f;
+  if (server.hasArg("fontIndex"))  cfg.fontIndex  = constrain(server.arg("fontIndex").toInt(), 0, FONT_COUNT - 1);
 
   saveConfig();
   strip.setBrightness(cfg.brightness);
