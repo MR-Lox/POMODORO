@@ -1,13 +1,6 @@
 \# ⏱️ Pomodoro Timer ESP32-C3 Super Mini
 
 
-
-\[!\[Platform: ESP32](https://img.shields.io/badge/Platform-ESP32--C3-blue?style=flat-square\&logo=espressif)](https://www.espressif.com/)
-
-\[!\[License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
-
-
-
 Un minuteur Pomodoro compact et élégant basé sur l'\*\*ESP32-C3 Super Mini\*\*. Ce projet combine un suivi de productivité précis avec une interface visuelle riche (OLED + NeoPixel) et une configuration simplifiée via un portail Web.
 
 
