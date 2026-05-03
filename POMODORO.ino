@@ -113,7 +113,7 @@ const Config cfgDefault = {
 // =====================
 // MODES PRINCIPAUX
 // =====================
-enum Mode { MODE_SET, MODE_WORK, MODE_BREAK, MODE_DONE, MODE_CREDITS };
+enum Mode { MODE_SET, MODE_WORK, MODE_BREAK, MODE_DONE, MODE_CREDITS, MODE_ARCADE };
 Mode mode = MODE_SET;
 
 // =====================
@@ -132,12 +132,92 @@ unsigned long doneStartMs    = 0; // timestamp entrée en MODE_DONE
 // EASTER EGG & CREDITS
 // =====================
 #define EGG_CLICKS      4
+#define EGG2_CLICKS     6      // 6 clics → Menu Arcade
 #define EGG_WINDOW_MS   2000   // fenêtre de détection (ms)
 #define CREDITS_DURATION 8000  // durée affichage crédits (ms)
 
 int   eggClickCount    = 0;
 unsigned long eggFirstClick = 0;
 unsigned long creditsStartMs = 0;
+
+// =====================
+// ARCADE
+// =====================
+enum GameID { GAME_NONE, GAME_DINO, GAME_PONG, GAME_BREAKOUT };
+GameID currentGame = GAME_NONE;
+int    arcadeMenuIndex = 0;
+#define ARCADE_GAME_COUNT 3
+
+// --- DINO ---
+#define DINO_GROUND_Y   54       // y du sol
+#define DINO_X          18       // x fixe du dino
+#define DINO_W           8
+#define DINO_H          12
+#define DINO_JUMP_VY   -5.5f    // vitesse initiale saut
+#define DINO_GRAVITY    0.45f
+#define CACTUS_W        6
+#define CACTUS_H_MIN    8
+#define CACTUS_H_MAX   16
+#define CACTUS_COUNT    2
+
+struct Cactus {
+  float x;
+  int   h;
+  bool  active;
+};
+
+struct DinoState {
+  float y;
+  float vy;
+  bool  onGround;
+  Cactus cacti[CACTUS_COUNT];
+  float speed;
+  int   score;
+  bool  dead;
+  unsigned long lastFrame;
+};
+DinoState dino;
+
+// --- PONG ---
+#define PONG_PADDLE_H   14
+#define PONG_PADDLE_W    3
+#define PONG_BALL_SIZE   2
+#define PONG_WIN_SCORE   7
+
+struct PongState {
+  float ballX, ballY;
+  float ballVX, ballVY;
+  float playerY;   // raquette joueur (droite)
+  float aiY;       // raquette IA (gauche)
+  int   scorePlayer;
+  int   scoreAI;
+  bool  paused;    // true = attente lancer
+  unsigned long lastFrame;
+};
+PongState pong;
+
+// --- BREAKOUT ---
+#define BRK_COLS        8
+#define BRK_ROWS        4
+#define BRK_BRICK_W    14
+#define BRK_BRICK_H     5
+#define BRK_BRICK_GAP   1
+#define BRK_PADDLE_W   20
+#define BRK_PADDLE_H    3
+#define BRK_PADDLE_Y   60
+#define BRK_BALL_R      2
+
+struct BreakoutState {
+  bool  bricks[BRK_ROWS][BRK_COLS];
+  float ballX, ballY;
+  float ballVX, ballVY;
+  float paddleX;
+  int   score;
+  int   lives;
+  bool  launched;
+  unsigned long lastFrame;
+};
+BreakoutState brk;
 
 // Etoiles pour l'arrière-plan crédits
 #define STAR_COUNT 20
@@ -265,6 +345,8 @@ const GFXfont* getFont(uint8_t idx) {
 // ENCODEUR / BOUTON
 // =====================
 long lastEncoderPos  = 0;
+long encPosPong      = 0;  // position encodeur dédiée Pong
+long encPosBreakout  = 0;  // position encodeur dédiée Breakout
 bool lastButtonState = HIGH;
 unsigned long btnPressTime = 0;
 bool btnLongHandled = false;
@@ -303,6 +385,657 @@ void initStars();
 void updateStars();
 bool checkEasterEgg();
 void flashConfirm();
+void enterArcade();
+void exitArcade();
+void drawArcadeMenu();
+void initDino();
+void updateDino();
+void drawDino();
+void initPong();
+void updatePong(int encDelta, bool btnPressed);
+void drawPong();
+void initBreakout();
+void updateBreakout(int encDelta, bool btnPressed);
+void drawBreakout();
+void arcadeLEDs();
+void gameOverSequence(int score, const char* gameName);
+void runInGameCountdown(void (*drawGameFn)());
+
+// ======================
+// ARCADE — MENU & UTILS
+// ======================
+
+void enterArcade()
+{
+  mode           = MODE_ARCADE;
+  currentGame    = GAME_NONE;
+  arcadeMenuIndex = 0;
+  strip.clear(); strip.show();
+  drawArcadeMenu();
+}
+
+void exitArcade()
+{
+  mode        = MODE_SET;
+  currentGame = GAME_NONE;
+  strip.clear(); strip.show();
+  drawScreen();
+  updateLEDs();
+}
+
+void drawArcadeMenu()
+{
+  display.clearDisplay();
+  display.setFont(nullptr);
+  display.setTextSize(1);
+
+  // Titre
+  display.setCursor(22, 0);
+  display.print("* ARCADE *");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+  const char* games[] = { "Dino Runner", "Pong vs IA", "Casse-briques" };
+  const char* icons[] = { "DINO", "PONG", "BRKOUT" };
+
+  for (int i = 0; i < ARCADE_GAME_COUNT; i++) {
+    int y = 14 + i * 16;
+    if (i == arcadeMenuIndex) {
+      display.fillRect(0, y - 1, 127, 14, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(4, y + 2);
+    display.print(games[i]);
+  }
+
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 58);
+  display.print("Btn=jouer  Long=quitter");
+  display.display();
+
+  // LEDs : couleur selon jeu surligné
+  uint32_t cols[] = {
+    strip.Color(0, 200, 50),    // dino : vert
+    strip.Color(50, 100, 255),  // pong : bleu
+    strip.Color(255, 100, 0)    // breakout : orange
+  };
+  for (int i = 0; i < LED_COUNT; i++)
+    strip.setPixelColor(i, cols[arcadeMenuIndex]);
+  strip.show();
+}
+
+void arcadeLEDs()
+{
+  // Appelée dans le loop quand MODE_ARCADE
+  // Pour le dino : on met à jour en continu dans updateDino
+  // Pour les autres : géré dans leurs update
+}
+
+void gameOverSequence(int score, const char* gameName)
+{
+  // Flash rouge sur les LEDs
+  for (int f = 0; f < 3; f++) {
+    for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, strip.Color(255, 0, 0));
+    strip.show();
+    delay(150);
+    strip.clear(); strip.show();
+    delay(100);
+  }
+
+  // Ecran game over
+  display.clearDisplay();
+  display.setFont(nullptr);
+  display.setTextSize(2);
+  display.setCursor(10, 8);
+  display.print("GAME OVER");
+  display.setTextSize(1);
+  display.setCursor(20, 30);
+  display.print(gameName);
+  display.setCursor(10, 42);
+  display.print("Score : ");
+  display.print(score);
+  display.setCursor(5, 54);
+  display.print("Btn = rejouer");
+  display.display();
+
+  // Attendre appui bouton
+  delay(500);
+  while (digitalRead(BTN) == HIGH) {
+    server.handleClient();
+    delay(10);
+  }
+  delay(200);
+
+  // Retour menu arcade
+  currentGame = GAME_NONE;
+  drawArcadeMenu();
+}
+
+// ======================
+// COUNTDOWN 3-2-1-GO
+// ======================
+// Countdown discret superposé au jeu (drawGameFn = drawPong ou drawBreakout)
+void runInGameCountdown(void (*drawGameFn)())
+{
+  const char* labels[] = { "3", "2", "1", "GO!" };
+  for (int i = 0; i < 4; i++) {
+    // Dessiner le jeu en arrière-plan
+    drawGameFn();
+
+    // Superposer le chiffre dans un cadre centré discret
+    display.setFont(nullptr);
+    display.setTextSize(2);
+    int16_t x1, y1; uint16_t w, h;
+    display.getTextBounds(labels[i], 0, 0, &x1, &y1, &w, &h);
+    int cx = (SCREEN_WIDTH  - w) / 2 - x1;
+    int cy = (SCREEN_HEIGHT - h) / 2 - y1;
+
+    // Petit fond noir pour lisibilité
+    display.fillRect(cx - 4, cy - 4, w + 8, h + 8, SSD1306_BLACK);
+    display.drawRect(cx - 5, cy - 5, w + 10, h + 10, SSD1306_WHITE);
+    display.setCursor(cx, cy);
+    display.print(labels[i]);
+    display.display();
+
+    // LEDs : fade in → fade out doux sur les 2 LEDs centrales
+    {
+      int duration = (i < 3) ? 800 : 400;
+      int steps    = 40;
+      int stepMs   = duration / steps;
+      for (int s = 0; s < steps; s++) {
+        // Sinus sur [0..PI] : part de 0, monte à 1, redescend à 0
+        float phase = (float)s / (steps - 1); // 0.0 → 1.0
+        float bri   = sin(phase * PI);         // 0 → 1 → 0
+        uint8_t val = (uint8_t)(bri * 100);    // max 100/255
+        strip.setPixelColor(5, strip.Color(val, val, val));
+        strip.setPixelColor(6, strip.Color(val, val, val));
+        strip.show();
+        delay(stepMs);
+      }
+      strip.setPixelColor(5, 0);
+      strip.setPixelColor(6, 0);
+      strip.show();
+    }
+  }
+}
+
+// ======================
+// DINO RUNNER
+// ======================
+
+// Sprite dino 8x12 (bitmap simplifié)
+const uint8_t dinoSprite[12] = {
+  0b00111000,  // tete
+  0b00111100,
+  0b00111110,
+  0b11111100,  // corps
+  0b11111100,
+  0b01111100,
+  0b00111100,
+  0b00101000,  // pattes
+  0b00111000,
+  0b01010000,
+  0b01000000,
+  0b11000000,
+};
+
+// Sprite cactus simple (6px large)
+void drawCactus(int x, int h)
+{
+  // Tronc central
+  display.fillRect(x + 2, DINO_GROUND_Y - h, 2, h, SSD1306_WHITE);
+  // Branches
+  if (h > 10) {
+    display.fillRect(x, DINO_GROUND_Y - h + 3, 2, 5, SSD1306_WHITE);
+    display.fillRect(x + 4, DINO_GROUND_Y - h + 5, 2, 4, SSD1306_WHITE);
+  } else {
+    display.fillRect(x, DINO_GROUND_Y - h + 2, 2, 3, SSD1306_WHITE);
+  }
+}
+
+void initDino()
+{
+  dino.y        = DINO_GROUND_Y - DINO_H;
+  dino.vy       = 0;
+  dino.onGround = true;
+  dino.speed    = 1.8f;
+  dino.score    = 0;
+  dino.dead     = false;
+  dino.lastFrame = millis();
+
+  // Init cactus
+  dino.cacti[0].x = 140;
+  dino.cacti[0].h = random(CACTUS_H_MIN, CACTUS_H_MAX);
+  dino.cacti[0].active = true;
+  dino.cacti[1].x = 220;
+  dino.cacti[1].h = random(CACTUS_H_MIN, CACTUS_H_MAX);
+  dino.cacti[1].active = true;
+}
+
+void updateDino()
+{
+  if (dino.dead) return;
+
+  unsigned long now = millis();
+  if (now - dino.lastFrame < 30) return; // ~33fps
+  float dt = (now - dino.lastFrame) / 1000.0f;
+  dino.lastFrame = now;
+
+  // Saut : détection front descendant bouton
+  static bool lastBtnDino = HIGH;
+  bool btnNow = digitalRead(BTN);
+  if (lastBtnDino == HIGH && btnNow == LOW && dino.onGround) {
+    dino.vy = DINO_JUMP_VY;
+    dino.onGround = false;
+  }
+  lastBtnDino = btnNow;
+
+  // Physique
+  dino.vy += DINO_GRAVITY;
+  dino.y  += dino.vy;
+
+  if (dino.y >= DINO_GROUND_Y - DINO_H) {
+    dino.y       = DINO_GROUND_Y - DINO_H;
+    dino.vy      = 0;
+    dino.onGround = true;
+  }
+
+  // Cactus
+  for (int c = 0; c < CACTUS_COUNT; c++) {
+    dino.cacti[c].x -= dino.speed;
+    if (dino.cacti[c].x < -CACTUS_W) {
+      dino.cacti[c].x = 128 + random(40, 80);
+      dino.cacti[c].h = random(CACTUS_H_MIN, CACTUS_H_MAX);
+      dino.score++;
+      // Accélération progressive
+      dino.speed = 1.8f + dino.score * 0.08f;
+      if (dino.speed > 4.5f) dino.speed = 4.5f;
+    }
+
+    // Collision AABB
+    int cx = (int)dino.cacti[c].x;
+    int cy = DINO_GROUND_Y - dino.cacti[c].h;
+    int dy = (int)dino.y;
+    bool collideX = (DINO_X + DINO_W - 2) > cx && (DINO_X + 2) < (cx + CACTUS_W);
+    bool collideY = (dy + DINO_H)          > cy && dy < DINO_GROUND_Y;
+    if (collideX && collideY) {
+      dino.dead = true;
+      gameOverSequence(dino.score, "Dino Runner");
+      return;
+    }
+  }
+
+  drawDino();
+}
+
+void drawDino()
+{
+  display.clearDisplay();
+
+  // Sol
+  display.drawLine(0, DINO_GROUND_Y, 127, DINO_GROUND_Y, SSD1306_WHITE);
+
+  // Score
+  display.setFont(nullptr);
+  display.setTextSize(1);
+  display.setCursor(80, 0);
+  display.print("Score:");
+  display.print(dino.score);
+
+  // Dino (sprite bitmap)
+  int dy = (int)dino.y;
+  for (int row = 0; row < DINO_H; row++) {
+    uint8_t rowData = dinoSprite[row];
+    for (int col = 0; col < DINO_W; col++) {
+      if (rowData & (0x80 >> col))
+        display.drawPixel(DINO_X + col, dy + row, SSD1306_WHITE);
+    }
+  }
+
+  // Cactus
+  for (int c = 0; c < CACTUS_COUNT; c++)
+    drawCactus((int)dino.cacti[c].x, dino.cacti[c].h);
+
+  display.display();
+
+  // LEDs : score → vert au début, rouge à haute vitesse
+  float ratio = (dino.speed - 1.8f) / (4.5f - 1.8f);
+  uint8_t r = (uint8_t)(ratio * 255);
+  uint8_t g = (uint8_t)((1.0f - ratio) * 255);
+  int ledsOn = min(LED_COUNT, 1 + dino.score / 2);
+  for (int i = 0; i < LED_COUNT; i++)
+    strip.setPixelColor(i, i < ledsOn ? strip.Color(r, g, 0) : 0);
+  strip.show();
+}
+
+// ======================
+// PONG VS IA
+// ======================
+
+void initPong()
+{
+  pong.ballX   = 64; pong.ballY = 32;
+  pong.ballVX  = 1.5f; pong.ballVY = 1.0f;
+  pong.playerY = 24;
+  pong.aiY     = 24;
+  pong.scorePlayer = 0; pong.scoreAI = 0;
+  pong.paused  = true;
+  pong.lastFrame = millis();
+}
+
+void updatePong(int encDelta, bool btnPressed)
+{
+  // Lire aussi le bouton physique directement (front descendant)
+  static bool lastBtnPong = HIGH;
+  bool btnNow = digitalRead(BTN);
+  bool btnEdge = (lastBtnPong == HIGH && btnNow == LOW);
+  lastBtnPong = btnNow;
+  if (btnEdge) btnPressed = true;
+
+  unsigned long now = millis();
+  if (now - pong.lastFrame < 25) return; // ~40fps
+  pong.lastFrame = now;
+
+  // Lancer balle
+  if (pong.paused && btnPressed) {
+    runInGameCountdown(drawPong);
+    encPosPong = -encoder.read() / 4; // reset encodeur après countdown
+    pong.lastFrame = millis();
+    pong.paused = false;
+    pong.ballVX = (pong.scorePlayer > pong.scoreAI) ? -1.5f : 1.5f;
+    pong.ballVY = 1.0f;
+  }
+  if (pong.paused) { drawPong(); return; }
+
+  // Raquette joueur (droite) — encodeur
+  pong.playerY += encDelta * 2.5f;
+  pong.playerY  = constrain(pong.playerY, 0, 64 - PONG_PADDLE_H);
+
+  // IA (gauche) — suit la balle avec un léger délai
+  float aiCenter = pong.aiY + PONG_PADDLE_H / 2.0f;
+  float aiSpeed  = 1.2f + (pong.scorePlayer + pong.scoreAI) * 0.05f;
+  if (aiSpeed > 2.5f) aiSpeed = 2.5f;
+  if (aiCenter < pong.ballY - 2) pong.aiY += aiSpeed;
+  else if (aiCenter > pong.ballY + 2) pong.aiY -= aiSpeed;
+  pong.aiY = constrain(pong.aiY, 0, 64 - PONG_PADDLE_H);
+
+  // Mouvement balle
+  pong.ballX += pong.ballVX;
+  pong.ballY += pong.ballVY;
+
+  // Rebond haut/bas
+  if (pong.ballY <= 0 || pong.ballY >= 64 - PONG_BALL_SIZE)
+    pong.ballVY = -pong.ballVY;
+
+  // Collision raquette joueur (droite x=121)
+  if (pong.ballX >= 121 - PONG_BALL_SIZE &&
+      pong.ballY + PONG_BALL_SIZE >= pong.playerY &&
+      pong.ballY <= pong.playerY + PONG_PADDLE_H) {
+    pong.ballVX = -abs(pong.ballVX) * 1.05f;
+    float rel = (pong.ballY - pong.playerY) / (float)PONG_PADDLE_H - 0.5f;
+    pong.ballVY = rel * 3.5f;
+  }
+
+  // Collision raquette IA (gauche x=4)
+  if (pong.ballX <= 4 + PONG_PADDLE_W &&
+      pong.ballY + PONG_BALL_SIZE >= pong.aiY &&
+      pong.ballY <= pong.aiY + PONG_PADDLE_H) {
+    pong.ballVX = abs(pong.ballVX) * 1.05f;
+    float rel = (pong.ballY - pong.aiY) / (float)PONG_PADDLE_H - 0.5f;
+    pong.ballVY = rel * 3.5f;
+  }
+
+  // Limiter vitesse max
+  if (pong.ballVX >  4.0f) pong.ballVX =  4.0f;
+  if (pong.ballVX < -4.0f) pong.ballVX = -4.0f;
+
+  // Point marqué
+  if (pong.ballX < 0) {
+    pong.scorePlayer++;
+    pong.paused = true;
+    pong.ballX = 64; pong.ballY = 32;
+    if (pong.scorePlayer >= PONG_WIN_SCORE) {
+      // Victoire joueur
+      for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, wheel(i * 21));
+      strip.show();
+      display.clearDisplay();
+      display.setFont(nullptr); display.setTextSize(2);
+      display.setCursor(8, 10); display.print("VICTOIRE!");
+      display.setTextSize(1);
+      display.setCursor(10, 40); display.print("Tu as battu l'IA !");
+      display.display();
+      delay(2500);
+      initPong(); currentGame = GAME_NONE; drawArcadeMenu(); return;
+    }
+  }
+  if (pong.ballX > 128) {
+    pong.scoreAI++;
+    pong.paused = true;
+    pong.ballX = 64; pong.ballY = 32;
+    if (pong.scoreAI >= PONG_WIN_SCORE) {
+      gameOverSequence(pong.scorePlayer, "Pong vs IA");
+      return;
+    }
+  }
+
+  drawPong();
+}
+
+void drawPong()
+{
+  display.clearDisplay();
+
+  // Ligne centrale pointillée
+  for (int y = 0; y < 64; y += 5) display.drawPixel(63, y, SSD1306_WHITE);
+
+  // Scores
+  display.setFont(nullptr); display.setTextSize(1);
+  display.setCursor(20, 0); display.print(pong.scoreAI);
+  display.setCursor(100, 0); display.print(pong.scorePlayer);
+
+  // Raquettes
+  display.fillRect(4,   (int)pong.aiY,     PONG_PADDLE_W, PONG_PADDLE_H, SSD1306_WHITE);
+  display.fillRect(121, (int)pong.playerY, PONG_PADDLE_W, PONG_PADDLE_H, SSD1306_WHITE);
+
+  // Balle
+  display.fillRect((int)pong.ballX, (int)pong.ballY, PONG_BALL_SIZE, PONG_BALL_SIZE, SSD1306_WHITE);
+
+  if (pong.paused) {
+    display.setCursor(30, 28); display.print("Btn=lancer");
+  }
+
+  display.display();
+
+  // LEDs : moitié gauche = score IA, moitié droite = score joueur
+  int ledPlayer = map(pong.scorePlayer, 0, PONG_WIN_SCORE, 0, LED_COUNT / 2);
+  int ledAI     = map(pong.scoreAI,     0, PONG_WIN_SCORE, 0, LED_COUNT / 2);
+  for (int i = 0; i < LED_COUNT; i++) {
+    if (i < ledPlayer)
+      strip.setPixelColor(i, strip.Color(0, 180, 255));     // joueur : bleu
+    else if (i >= LED_COUNT - ledAI)
+      strip.setPixelColor(i, strip.Color(255, 60, 0));       // IA : rouge
+    else
+      strip.setPixelColor(i, 0);
+  }
+  strip.show();
+}
+
+// ======================
+// CASSE-BRIQUES
+// ======================
+
+void initBreakout()
+{
+  // Init briques
+  for (int r = 0; r < BRK_ROWS; r++)
+    for (int c = 0; c < BRK_COLS; c++)
+      brk.bricks[r][c] = true;
+
+  brk.paddleX  = (128 - BRK_PADDLE_W) / 2;
+  brk.ballX    = 64; brk.ballY = BRK_PADDLE_Y - BRK_BALL_R * 2 - 1;
+  brk.ballVX   = 1.5f; brk.ballVY = -1.5f;
+  brk.score    = 0;
+  brk.lives    = 3;
+  brk.launched = false;
+  brk.lastFrame = millis();
+}
+
+void updateBreakout(int encDelta, bool btnPressed)
+{
+  // Lire aussi le bouton physique directement (front descendant)
+  static bool lastBtnBrk = HIGH;
+  bool btnNow = digitalRead(BTN);
+  bool btnEdge = (lastBtnBrk == HIGH && btnNow == LOW);
+  lastBtnBrk = btnNow;
+  if (btnEdge) btnPressed = true;
+
+  unsigned long now = millis();
+  if (now - brk.lastFrame < 25) return;
+  brk.lastFrame = now;
+
+  // Raquette
+  brk.paddleX += encDelta * 3.0f;
+  brk.paddleX  = constrain(brk.paddleX, 0, 128 - BRK_PADDLE_W);
+
+  // Lancer balle
+  if (!brk.launched && btnPressed) {
+    runInGameCountdown(drawBreakout);
+    encPosBreakout = -encoder.read() / 4; // reset encodeur après countdown
+    brk.lastFrame = millis();
+    brk.launched = true;
+    brk.ballVX   = 1.5f;
+    brk.ballVY   = -2.0f;
+  }
+
+  if (!brk.launched) {
+    // Balle colle à la raquette
+    brk.ballX = brk.paddleX + BRK_PADDLE_W / 2;
+    brk.ballY = BRK_PADDLE_Y - BRK_BALL_R - 1;
+    drawBreakout(); return;
+  }
+
+  // Mouvement
+  brk.ballX += brk.ballVX;
+  brk.ballY += brk.ballVY;
+
+  // Rebond murs gauche/droite
+  if (brk.ballX <= BRK_BALL_R || brk.ballX >= 128 - BRK_BALL_R)
+    brk.ballVX = -brk.ballVX;
+  // Rebond plafond
+  if (brk.ballY <= BRK_BALL_R)
+    brk.ballVY = abs(brk.ballVY);
+
+  // Collision raquette
+  if (brk.ballY + BRK_BALL_R >= BRK_PADDLE_Y &&
+      brk.ballY + BRK_BALL_R <= BRK_PADDLE_Y + BRK_PADDLE_H &&
+      brk.ballX >= brk.paddleX - BRK_BALL_R &&
+      brk.ballX <= brk.paddleX + BRK_PADDLE_W + BRK_BALL_R) {
+    brk.ballVY = -abs(brk.ballVY);
+    float rel  = (brk.ballX - (brk.paddleX + BRK_PADDLE_W / 2.0f)) / (BRK_PADDLE_W / 2.0f);
+    brk.ballVX = rel * 2.5f;
+  }
+
+  // Balle perdue
+  if (brk.ballY > 68) {
+    brk.lives--;
+    if (brk.lives <= 0) {
+      gameOverSequence(brk.score, "Casse-briques");
+      return;
+    }
+    brk.launched = false;
+    brk.ballX = brk.paddleX + BRK_PADDLE_W / 2;
+    brk.ballY = BRK_PADDLE_Y - BRK_BALL_R - 1;
+  }
+
+  // Collision briques
+  int totalBricks = 0;
+  for (int r = 0; r < BRK_ROWS; r++) {
+    for (int c = 0; c < BRK_COLS; c++) {
+      if (!brk.bricks[r][c]) continue;
+      totalBricks++;
+      int bx = c * (BRK_BRICK_W + BRK_BRICK_GAP) + 1;
+      int by = r * (BRK_BRICK_H + BRK_BRICK_GAP) + 8;
+      if (brk.ballX + BRK_BALL_R > bx && brk.ballX - BRK_BALL_R < bx + BRK_BRICK_W &&
+          brk.ballY + BRK_BALL_R > by && brk.ballY - BRK_BALL_R < by + BRK_BRICK_H) {
+        brk.bricks[r][c] = false;
+        brk.score++;
+        brk.ballVY = -brk.ballVY;
+        // Accélération légère
+        float spd = sqrt(brk.ballVX*brk.ballVX + brk.ballVY*brk.ballVY);
+        if (spd < 4.0f) { brk.ballVX *= 1.04f; brk.ballVY *= 1.04f; }
+      }
+    }
+  }
+
+  // Victoire : toutes les briques cassées
+  if (totalBricks == 0) {
+    for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, wheel(i * 21));
+    strip.show();
+    display.clearDisplay();
+    display.setFont(nullptr); display.setTextSize(2);
+    display.setCursor(8, 8); display.print("BRAVO !");
+    display.setTextSize(1);
+    display.setCursor(5, 32); display.print("Score : "); display.print(brk.score);
+    display.setCursor(5, 44); display.print("Toutes cassees !");
+    display.display();
+    delay(2500);
+    initBreakout(); currentGame = GAME_NONE; drawArcadeMenu(); return;
+  }
+
+  drawBreakout();
+}
+
+void drawBreakout()
+{
+  display.clearDisplay();
+  display.setFont(nullptr); display.setTextSize(1);
+
+  // Score + vies
+  display.setCursor(0, 0); display.print("Score:"); display.print(brk.score);
+  display.setCursor(90, 0);
+  for (int l = 0; l < brk.lives; l++) display.print("*");
+
+  // Briques
+  for (int r = 0; r < BRK_ROWS; r++) {
+    for (int c = 0; c < BRK_COLS; c++) {
+      if (!brk.bricks[r][c]) continue;
+      int bx = c * (BRK_BRICK_W + BRK_BRICK_GAP) + 1;
+      int by = r * (BRK_BRICK_H + BRK_BRICK_GAP) + 8;
+      display.drawRect(bx, by, BRK_BRICK_W, BRK_BRICK_H, SSD1306_WHITE);
+    }
+  }
+
+  // Raquette
+  display.fillRect((int)brk.paddleX, BRK_PADDLE_Y, BRK_PADDLE_W, BRK_PADDLE_H, SSD1306_WHITE);
+
+  // Balle
+  display.fillCircle((int)brk.ballX, (int)brk.ballY, BRK_BALL_R, SSD1306_WHITE);
+
+  if (!brk.launched) {
+    display.setCursor(20, 52); display.print("Btn = lancer !");
+  }
+
+  display.display();
+
+  // LEDs : briques restantes
+  int bricksLeft = 0;
+  for (int r = 0; r < BRK_ROWS; r++)
+    for (int c = 0; c < BRK_COLS; c++)
+      if (brk.bricks[r][c]) bricksLeft++;
+  int total = BRK_ROWS * BRK_COLS;
+  int ledsOn = map(bricksLeft, 0, total, 0, LED_COUNT);
+  float ratio = 1.0f - (float)bricksLeft / total;
+  for (int i = 0; i < LED_COUNT; i++) {
+    if (i < ledsOn)
+      strip.setPixelColor(i, strip.Color((uint8_t)(ratio*255), (uint8_t)((1-ratio)*200), 50));
+    else
+      strip.setPixelColor(i, 0);
+  }
+  strip.show();
+}
+
+
 // ======================
 // FEEDBACK VALIDATION
 // Flash vert sur le ruban LED + coche sur l'OLED
@@ -408,6 +1141,21 @@ void loop()
       strip.clear(); strip.show();
       drawScreen(); updateLEDs();
     }
+  } else if (mode == MODE_ARCADE) {
+    if (currentGame == GAME_DINO) {
+      updateDino();
+    } else if (currentGame == GAME_PONG) {
+      long pos = -encoder.read() / 4;
+      int delta = (int)(pos - encPosPong);
+      encPosPong = pos;
+      updatePong(delta, false);
+    } else if (currentGame == GAME_BREAKOUT) {
+      long pos = -encoder.read() / 4;
+      int delta = (int)(pos - encPosBreakout);
+      encPosBreakout = pos;
+      updateBreakout(delta, false);
+    }
+    // Menu arcade : géré par handleEncoder/handleButton
   } else {
     updateTimer();
     // Mise à jour continue des LEDs pour le pulse (en WORK et BREAK)
@@ -481,6 +1229,15 @@ void handleEncoder()
     return;
   }
 
+  // En MODE_ARCADE : seulement le menu (les jeux lisent l'encodeur dans le loop)
+  if (mode == MODE_ARCADE) {
+    if (currentGame == GAME_NONE && delta != 0) {
+      arcadeMenuIndex = (arcadeMenuIndex + delta + ARCADE_GAME_COUNT) % ARCADE_GAME_COUNT;
+      drawArcadeMenu();
+    }
+    return;
+  }
+
   // En MODE_SET : ajuster workMinutes
   if (mode == MODE_SET) {
     workMinutes += delta * STEP_MINUTES;
@@ -515,6 +1272,15 @@ void handleButton()
         mode = MODE_SET;
         strip.clear(); strip.show();
         drawScreen(); updateLEDs();
+      } else if (mode == MODE_ARCADE) {
+        if (currentGame != GAME_NONE) {
+          // Quitter le jeu en cours → retour menu arcade
+          currentGame = GAME_NONE;
+          drawArcadeMenu();
+        } else {
+          // Quitter l'arcade → retour timer
+          exitArcade();
+        }
       } else if (menuState == MENU_NONE) {
         enterMenu(MENU_MAIN);
       } else {
@@ -531,7 +1297,29 @@ void handleButton()
       // Easter egg compté EN PREMIER, quel que soit le mode/menu
       bool eggJustTriggered = checkEasterEgg();
       if (eggJustTriggered) {
-        // L'easter egg vient de s'ouvrir, on ne fait rien d'autre
+        // L'easter egg vient de s'ouvrir (crédits ou arcade), on ne fait rien d'autre
+      } else if (mode == MODE_ARCADE) {
+        if (currentGame == GAME_NONE) {
+          // Menu arcade : bouton court = lancer le jeu sélectionné
+          // Reset encodeur dédié selon le jeu
+          switch (arcadeMenuIndex) {
+            case 0:
+              initDino();
+              currentGame = GAME_DINO;
+              break;
+            case 1:
+              encPosPong = -encoder.read() / 4;
+              initPong();
+              currentGame = GAME_PONG;
+              break;
+            case 2:
+              encPosBreakout = -encoder.read() / 4;
+              initBreakout();
+              currentGame = GAME_BREAKOUT;
+              break;
+          }
+        }
+        // Les actions in-game (saut, lancer) sont gérées localement dans les update
       } else if (mode == MODE_CREDITS) {
         // Fermer les crédits
         mode = MODE_SET;
@@ -1137,8 +1925,7 @@ void showBootScreen()
     // Version
     if (age > 1000) {
       display.setTextSize(1);
-      display.setCursor(98, 56);
-      // Inversion locale pour la version (texte noir sur barre blanche si chevauchement)
+      display.setCursor(98, imgY + BOOT_IMG_H + 6); // même niveau que "TIMER"
       display.print("v2.0");
     }
 
@@ -1263,10 +2050,47 @@ bool checkEasterEgg()
   Serial.print("[EGG] Clic ");
   Serial.print(eggClickCount);
   Serial.print("/");
-  Serial.println(EGG_CLICKS);
+  Serial.print(EGG_CLICKS);
+  Serial.print(" (arcade:");
+  Serial.print(EGG2_CLICKS);
+  Serial.println(")");
 
-  if (eggClickCount >= EGG_CLICKS) {
-    Serial.println("[EGG] DECLENCHE !");
+  // Easter egg 2 : 6 clics → Arcade (priorité absolue)
+  if (eggClickCount >= EGG2_CLICKS) {
+    Serial.println("[EGG2] ARCADE DECLENCHE !");
+    eggClickCount = 0;
+    enterArcade();
+    return true;
+  }
+
+  // Easter egg 1 : exactement 4 clics → attendre 500ms pour voir si un 5e arrive
+  // Si oui on laisse le compteur continuer vers 6, sinon on déclenche les crédits
+  if (eggClickCount == EGG_CLICKS) {
+    Serial.println("[EGG1] 4 clics - attente 500ms...");
+    unsigned long waitStart = millis();
+    while (millis() - waitStart < 500) {
+      server.handleClient(); // ne pas bloquer le serveur web
+      // Si un nouveau clic arrive pendant l'attente, on continue
+      if (digitalRead(BTN) == LOW) {
+        // Debounce
+        delay(30);
+        if (digitalRead(BTN) == LOW) {
+          // Attendre relâchement
+          while (digitalRead(BTN) == LOW) delay(5);
+          eggClickCount++;
+          Serial.print("[EGG] Clic bonus: ");
+          Serial.println(eggClickCount);
+          if (eggClickCount >= EGG2_CLICKS) {
+            Serial.println("[EGG2] ARCADE DECLENCHE !");
+            eggClickCount = 0;
+            enterArcade();
+            return true;
+          }
+        }
+      }
+    }
+    // Aucun clic supplémentaire → crédits
+    Serial.println("[EGG1] CREDITS DECLENCHE !");
     eggClickCount  = 0;
     creditsStartMs = millis();
     initStars();
