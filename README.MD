@@ -175,7 +175,7 @@ POMODOROX/
 ## 👾 Crédits
 
 **Code original** — WILLAU  
-**Update & new features** — _n3o_
+**Update & new features** — _ n3o _
 
 ---
 
