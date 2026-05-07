@@ -113,7 +113,7 @@ const Config cfgDefault = {
 // =====================
 // MODES PRINCIPAUX
 // =====================
-enum Mode { MODE_SET, MODE_WORK, MODE_BREAK, MODE_DONE, MODE_CREDITS, MODE_ARCADE };
+enum Mode { MODE_SET, MODE_WORK, MODE_BREAK, MODE_DONE, MODE_CREDITS, MODE_ARCADE, MODE_BOOT_MENU, MODE_TIMER_SIMPLE, MODE_CHRONO, MODE_AMBIANCE };
 Mode mode = MODE_SET;
 
 // =====================
@@ -347,9 +347,43 @@ const GFXfont* getFont(uint8_t idx) {
 long lastEncoderPos  = 0;
 long encPosPong      = 0;  // position encodeur dédiée Pong
 long encPosBreakout  = 0;  // position encodeur dédiée Breakout
+long encPosBootMenu  = 0;  // position encodeur dédiée Boot Menu
 bool lastButtonState = HIGH;
 unsigned long btnPressTime = 0;
 bool btnLongHandled = false;
+
+// =====================
+// BOOT MENU
+// =====================
+#define BOOT_MENU_COUNT 4
+int bootMenuIndex = 0;
+
+// =====================
+// HIGH SCORES ARCADE
+// =====================
+int hsDino     = 82;
+int hsPong     = 0;
+int hsBreakout = 0;
+
+// =====================
+// TIMER SIMPLE
+// =====================
+int           timerSimpleMinutes   = 5;
+int           timerSimpleRemaining = 5 * 60;
+bool          timerSimpleRunning   = false;
+unsigned long timerSimpleLast      = 0;
+
+// =====================
+// CHRONOMETRE
+// =====================
+unsigned long chronoElapsed = 0;
+bool          chronoRunning = false;
+unsigned long chronoStart   = 0;
+
+// =====================
+// AMBIANCE
+// =====================
+int ambianceEffect = 0;
 
 // =====================
 // PROTOTYPES
@@ -400,6 +434,18 @@ void drawBreakout();
 void arcadeLEDs();
 void gameOverSequence(int score, const char* gameName);
 void runInGameCountdown(void (*drawGameFn)());
+void loadHighScores();
+void saveHighScore(const char* key, int score);
+void drawBootMenu();
+void drawIconTomate(int cx, int cy);
+void drawIconSablier(int cx, int cy);
+void drawIconChrono(int cx, int cy);
+void drawIconAmpoule(int cx, int cy);
+void updateChrono();
+void drawChrono();
+void updateTimerSimple();
+void drawTimerSimple();
+void updateAmbiance();
 
 // ======================
 // ARCADE — MENU & UTILS
@@ -419,8 +465,9 @@ void exitArcade()
   mode        = MODE_SET;
   currentGame = GAME_NONE;
   strip.clear(); strip.show();
-  drawScreen();
-  updateLEDs();
+  encPosBootMenu = -encoder.read() / 4;
+  drawBootMenu();
+  strip.clear(); strip.show();
 }
 
 void drawArcadeMenu()
@@ -435,7 +482,7 @@ void drawArcadeMenu()
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
   const char* games[] = { "Dino Runner", "Pong vs IA", "Casse-briques" };
-  const char* icons[] = { "DINO", "PONG", "BRKOUT" };
+  int highScores[]     = { hsDino, hsPong, hsBreakout };
 
   for (int i = 0; i < ARCADE_GAME_COUNT; i++) {
     int y = 14 + i * 16;
@@ -447,6 +494,8 @@ void drawArcadeMenu()
     }
     display.setCursor(4, y + 2);
     display.print(games[i]);
+    display.setCursor(88, y + 2);
+    display.print("HI:"); display.print(highScores[i]);
   }
 
   display.setTextColor(SSD1306_WHITE);
@@ -474,6 +523,14 @@ void arcadeLEDs()
 
 void gameOverSequence(int score, const char* gameName)
 {
+  // Récupérer le hi score du jeu concerné
+  int hs = 0;
+  bool newRecord = false;
+  if      (strcmp(gameName, "Dino Runner")   == 0) hs = hsDino;
+  else if (strcmp(gameName, "Pong vs IA")    == 0) hs = hsPong;
+  else if (strcmp(gameName, "Casse-briques") == 0) hs = hsBreakout;
+  newRecord = (score >= hs && score > 0);
+
   // Flash rouge sur les LEDs
   for (int f = 0; f < 3; f++) {
     for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, strip.Color(255, 0, 0));
@@ -483,20 +540,37 @@ void gameOverSequence(int score, const char* gameName)
     delay(100);
   }
 
+  // Flash doré si nouveau record
+  if (newRecord) {
+    for (int f = 0; f < 3; f++) {
+      for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, strip.Color(255, 180, 0));
+      strip.show();
+      delay(150);
+      strip.clear(); strip.show();
+      delay(100);
+    }
+  }
+
   // Ecran game over
   display.clearDisplay();
   display.setFont(nullptr);
   display.setTextSize(2);
-  display.setCursor(10, 8);
+  display.setCursor(10, 0);
   display.print("GAME OVER");
   display.setTextSize(1);
-  display.setCursor(20, 30);
+  display.setCursor(20, 18);
   display.print(gameName);
-  display.setCursor(10, 42);
-  display.print("Score : ");
-  display.print(score);
-  display.setCursor(5, 54);
-  display.print("Btn = rejouer");
+  display.setCursor(10, 30);
+  display.print("Score  : "); display.print(score);
+  display.setCursor(10, 40);
+  display.print("Record : "); display.print(hs);
+  if (newRecord) {
+    display.setCursor(10, 52);
+    display.print("*NOUVEAU RECORD !*");
+  } else {
+    display.setCursor(5, 54);
+    display.print("Btn = rejouer");
+  }
   display.display();
 
   // Attendre appui bouton
@@ -661,6 +735,10 @@ void updateDino()
     bool collideY = (dy + DINO_H)          > cy && dy < DINO_GROUND_Y;
     if (collideX && collideY) {
       dino.dead = true;
+      if (dino.score > hsDino) {
+        hsDino = dino.score;
+        saveHighScore("hsDino", hsDino);
+      }
       gameOverSequence(dino.score, "Dino Runner");
       return;
     }
@@ -796,14 +874,18 @@ void updatePong(int encDelta, bool btnPressed)
     pong.paused = true;
     pong.ballX = 64; pong.ballY = 32;
     if (pong.scorePlayer >= PONG_WIN_SCORE) {
-      // Victoire joueur
+      if (pong.scorePlayer > hsPong) {
+        hsPong = pong.scorePlayer;
+        saveHighScore("hsPong", hsPong);
+      }
       for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, wheel(i * 21));
       strip.show();
       display.clearDisplay();
       display.setFont(nullptr); display.setTextSize(2);
-      display.setCursor(8, 10); display.print("VICTOIRE!");
+      display.setCursor(8, 8); display.print("VICTOIRE!");
       display.setTextSize(1);
-      display.setCursor(10, 40); display.print("Tu as battu l'IA !");
+      display.setCursor(10, 30); display.print("Tu as battu l'IA !");
+      display.setCursor(10, 42); display.print("Record: "); display.print(hsPong);
       display.display();
       delay(2500);
       initPong(); currentGame = GAME_NONE; drawArcadeMenu(); return;
@@ -976,8 +1058,13 @@ void updateBreakout(int encDelta, bool btnPressed)
     display.setFont(nullptr); display.setTextSize(2);
     display.setCursor(8, 8); display.print("BRAVO !");
     display.setTextSize(1);
-    display.setCursor(5, 32); display.print("Score : "); display.print(brk.score);
-    display.setCursor(5, 44); display.print("Toutes cassees !");
+    if (brk.score > hsBreakout) {
+      hsBreakout = brk.score;
+      saveHighScore("hsBreakout", hsBreakout);
+    }
+    display.setCursor(5, 28); display.print("Score : "); display.print(brk.score);
+    display.setCursor(5, 40); display.print("Record: "); display.print(hsBreakout);
+    display.setCursor(5, 52); display.print("Toutes cassees !");
     display.display();
     delay(2500);
     initBreakout(); currentGame = GAME_NONE; drawArcadeMenu(); return;
@@ -1105,6 +1192,7 @@ void setup()
   strip.show();
 
   loadConfig();
+  loadHighScores();
   strip.setBrightness(cfg.brightness);
 
   initStars();
@@ -1116,7 +1204,10 @@ void setup()
   Serial.println(WiFi.softAPIP());
   startWebServer();
 
-  drawScreen();
+  mode           = MODE_BOOT_MENU;
+  bootMenuIndex  = 0;
+  encPosBootMenu = -encoder.read() / 4;
+  drawBootMenu();
   updateLEDs();
 }
 
@@ -1126,6 +1217,59 @@ void setup()
 void loop()
 {
   server.handleClient();
+
+  // Menu boot
+  if (mode == MODE_BOOT_MENU) {
+    long pos   = -encoder.read() / 4;
+    int  delta = (int)(pos - encPosBootMenu);
+    if (delta != 0) {
+      encPosBootMenu = pos;
+      bootMenuIndex  = (bootMenuIndex + delta + BOOT_MENU_COUNT) % BOOT_MENU_COUNT;
+      drawBootMenu();
+    }
+    static bool lastBtnBoot = HIGH;
+    bool btnNow = digitalRead(BTN);
+    if (lastBtnBoot == HIGH && btnNow == LOW) {
+      delay(30);
+      if (digitalRead(BTN) == LOW) {
+        while (digitalRead(BTN) == LOW) delay(5);
+        switch (bootMenuIndex) {
+          case 0: // Pomodoro
+            mode = MODE_SET;
+            lastEncoderPos = -encoder.read() / 4;
+            drawScreen(); updateLEDs();
+            break;
+          case 1: // Minuteur simple
+            timerSimpleMinutes   = 5;
+            timerSimpleRemaining = timerSimpleMinutes * 60;
+            timerSimpleRunning   = false;
+            mode = MODE_TIMER_SIMPLE;
+            lastEncoderPos = -encoder.read() / 4;
+            drawTimerSimple();
+            break;
+          case 2: // Chrono
+            mode = MODE_CHRONO;
+            chronoElapsed = 0; chronoRunning = false; chronoStart = 0;
+            lastEncoderPos = -encoder.read() / 4;
+            drawChrono();
+            break;
+          case 3: // Ambiance
+            mode = MODE_AMBIANCE;
+            ambianceEffect = 0;
+            strip.clear(); strip.show();
+            break;
+        }
+      }
+    }
+    lastBtnBoot = btnNow;
+    return;
+  }
+
+  // Modes custom
+  if (mode == MODE_TIMER_SIMPLE) { updateTimerSimple(); return; }
+  if (mode == MODE_CHRONO)       { updateChrono();      return; }
+  if (mode == MODE_AMBIANCE)     { updateAmbiance();    return; }
+
   handleEncoder();
   handleButton();
 
@@ -1193,6 +1337,22 @@ void saveConfig()
   prefs.putFloat("pulseMin",cfg.pulseMin);
   prefs.putFloat("pulseMax",cfg.pulseMax);
   prefs.putUChar("fontIdx", cfg.fontIndex);
+  prefs.end();
+}
+
+void loadHighScores()
+{
+  prefs.begin("scores", true);
+  hsDino     = prefs.getInt("hsDino",     0);
+  hsPong     = prefs.getInt("hsPong",     0);
+  hsBreakout = prefs.getInt("hsBreakout", 0);
+  prefs.end();
+}
+
+void saveHighScore(const char* key, int score)
+{
+  prefs.begin("scores", false);
+  prefs.putInt(key, score);
   prefs.end();
 }
 
@@ -1408,6 +1568,10 @@ void drawScreen()
     drawMenu();
     return;
   }
+
+  // Ces modes gèrent leur propre affichage
+  if (mode == MODE_BOOT_MENU || mode == MODE_TIMER_SIMPLE ||
+      mode == MODE_CHRONO    || mode == MODE_AMBIANCE) return;
 
   display.clearDisplay();
 
@@ -1926,7 +2090,7 @@ void showBootScreen()
     if (age > 1000) {
       display.setTextSize(1);
       display.setCursor(98, imgY + BOOT_IMG_H + 6); // même niveau que "TIMER"
-      display.print("v2.0");
+      display.print("v3");
     }
 
     display.display();
@@ -2100,6 +2264,442 @@ bool checkEasterEgg()
   return false;
 }
 
+
+
+// ======================
+// MENU BOOT — PLEIN ECRAN
+// ======================
+
+void drawIconTomate(int cx, int cy)
+{
+  // Corps de la tomate (cercle principal)
+  display.fillCircle(cx, cy + 2, 13, SSD1306_WHITE);
+  // Reflet (petit cercle noir en haut gauche)
+  display.fillCircle(cx - 4, cy - 4, 3, SSD1306_BLACK);
+  // Tige (ligne verticale)
+  display.drawLine(cx, cy - 11, cx, cy - 15, SSD1306_WHITE);
+  // Feuilles (deux petits traits obliques)
+  display.drawLine(cx, cy - 13, cx - 5, cy - 17, SSD1306_WHITE);
+  display.drawLine(cx, cy - 13, cx + 5, cy - 17, SSD1306_WHITE);
+  display.drawLine(cx, cy - 13, cx - 3, cy - 18, SSD1306_WHITE);
+  display.drawLine(cx, cy - 13, cx + 3, cy - 18, SSD1306_WHITE);
+}
+
+void drawIconSablier(int cx, int cy)
+{
+  // Cadre haut et bas
+  display.drawLine(cx - 10, cy - 14, cx + 10, cy - 14, SSD1306_WHITE);
+  display.drawLine(cx - 10, cy + 14, cx + 10, cy + 14, SSD1306_WHITE);
+  // Contour sablier (deux triangles)
+  display.drawLine(cx - 10, cy - 14, cx,      cy,      SSD1306_WHITE);
+  display.drawLine(cx + 10, cy - 14, cx,      cy,      SSD1306_WHITE);
+  display.drawLine(cx - 10, cy + 14, cx,      cy,      SSD1306_WHITE);
+  display.drawLine(cx + 10, cy + 14, cx,      cy,      SSD1306_WHITE);
+  // Sable en haut (triangle plein partiel)
+  for (int i = 0; i < 5; i++) {
+    int w = 9 - i;
+    display.drawLine(cx - w, cy - 14 + i, cx + w, cy - 14 + i, SSD1306_WHITE);
+  }
+  // Sable en bas (petit triangle plein)
+  for (int i = 0; i < 4; i++) {
+    int w = i;
+    display.drawLine(cx - w, cy + 10 + i, cx + w, cy + 10 + i, SSD1306_WHITE);
+  }
+  // Filet de sable (point central)
+  display.drawPixel(cx, cy - 1, SSD1306_WHITE);
+  display.drawPixel(cx, cy,     SSD1306_WHITE);
+  display.drawPixel(cx, cy + 1, SSD1306_WHITE);
+}
+
+void drawIconChrono(int cx, int cy)
+{
+  // Corps du chronomètre (cercle)
+  display.drawCircle(cx, cy + 2, 12, SSD1306_WHITE);
+  // Couronne (rectangle arrondi en haut)
+  display.fillRect(cx - 3, cy - 12, 6, 3, SSD1306_WHITE);
+  // Bouton poussoir (petit rect à droite)
+  display.fillRect(cx + 3, cy - 14, 4, 2, SSD1306_WHITE);
+  // Aiguille des secondes (vers 2h)
+  display.drawLine(cx, cy + 2, cx + 7, cy - 4, SSD1306_WHITE);
+  // Centre
+  display.fillCircle(cx, cy + 2, 1, SSD1306_WHITE);
+  // Graduations (4 petits traits)
+  display.drawLine(cx,      cy - 10, cx,      cy - 8,  SSD1306_WHITE); // 12h
+  display.drawLine(cx + 10, cy + 2,  cx + 8,  cy + 2,  SSD1306_WHITE); // 3h
+  display.drawLine(cx,      cy + 14, cx,      cy + 12, SSD1306_WHITE); // 6h
+  display.drawLine(cx - 10, cy + 2,  cx - 8,  cy + 2,  SSD1306_WHITE); // 9h
+}
+
+void drawIconAmpoule(int cx, int cy)
+{
+  // Corps de l'ampoule (cercle du haut)
+  display.drawCircle(cx, cy - 2, 10, SSD1306_WHITE);
+  // Remplissage partiel (intérieur)
+  display.fillCircle(cx, cy - 2, 7, SSD1306_WHITE);
+  // Culot (rectangles en bas)
+  display.fillRect(cx - 5, cy + 8,  10, 3, SSD1306_BLACK); // espace
+  display.drawRect(cx - 5, cy + 8,  10, 3, SSD1306_WHITE);
+  display.drawRect(cx - 5, cy + 11, 10, 3, SSD1306_WHITE);
+  // Jonction corps/culot
+  display.drawLine(cx - 5, cy + 8, cx - 5, cy + 7, SSD1306_WHITE);
+  display.drawLine(cx + 5, cy + 8, cx + 5, cy + 7, SSD1306_WHITE);
+  // Rayons (4 lignes courtes autour)
+  display.drawLine(cx,      cy - 14, cx,      cy - 13, SSD1306_WHITE);
+  display.drawLine(cx + 12, cy - 6,  cx + 11, cy - 5,  SSD1306_WHITE);
+  display.drawLine(cx - 12, cy - 6,  cx - 11, cy - 5,  SSD1306_WHITE);
+  display.drawLine(cx + 10, cy + 6,  cx + 9,  cy + 5,  SSD1306_WHITE);
+  display.drawLine(cx - 10, cy + 6,  cx - 9,  cy + 5,  SSD1306_WHITE);
+}
+
+void drawBootMenu()
+{
+  display.clearDisplay();
+  display.setFont(nullptr);
+
+  const char* labels[] = { "POMODORO", "TIMER", "CHRONO", "AMBIANCE" };
+
+  // Icône en haut centrée
+  int icx = 64;
+  int icy = 18;
+
+  switch (bootMenuIndex) {
+    case 0: drawIconTomate(icx, icy);  break;
+    case 1: drawIconSablier(icx, icy); break;
+    case 2: drawIconChrono(icx, icy);  break;
+    case 3: drawIconAmpoule(icx, icy); break;
+  }
+
+  // Nom du mode en taille 1, centré en milieu bas
+  display.setTextSize(1);
+  int16_t x1, y1; uint16_t w, h;
+  display.getTextBounds(labels[bootMenuIndex], 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2 - x1, 40);
+  display.print(labels[bootMenuIndex]);
+
+  // Points de navigation en bas
+  int dotY      = 56;
+  int dotSpacing = 10;
+  int startX    = (SCREEN_WIDTH - (BOOT_MENU_COUNT * dotSpacing)) / 2 + 4;
+  for (int i = 0; i < BOOT_MENU_COUNT; i++) {
+    int dx = startX + i * dotSpacing;
+    if (i == bootMenuIndex)
+      display.fillCircle(dx, dotY, 3, SSD1306_WHITE);
+    else
+      display.drawCircle(dx, dotY, 3, SSD1306_WHITE);
+  }
+
+  display.display();
+
+  // LEDs : couleur thématique par mode
+  uint32_t colors[] = {
+    strip.Color(255, 20, 0),    // Pomodoro : rouge tomate
+    strip.Color(0, 150, 255),   // Timer : bleu
+    strip.Color(0, 255, 150),   // Chrono : vert cyan
+    strip.Color(180, 100, 255), // Ambiance : violet
+  };
+  // Respiration douce sur les LEDs
+  float bri = (sin(millis() / 600.0f) + 1.0f) / 2.0f * 0.6f + 0.2f;
+  uint32_t c = colors[bootMenuIndex];
+  uint8_t r = ((c >> 16) & 0xFF) * bri;
+  uint8_t g = ((c >>  8) & 0xFF) * bri;
+  uint8_t b = ( c        & 0xFF) * bri;
+  for (int i = 0; i < LED_COUNT; i++)
+    strip.setPixelColor(i, strip.Color(r, g, b));
+  strip.show();
+}
+
+// ======================
+// MINUTEUR SIMPLE
+// ======================
+void drawTimerSimple()
+{
+  display.clearDisplay();
+  display.setFont(nullptr);
+  display.setTextSize(1);
+  display.setCursor(30, 0);
+  display.print("MINUTEUR");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+  // Temps restant en grand
+  const GFXfont* fnt = getFont(cfg.fontIndex);
+  display.setFont(fnt);
+  display.setTextSize(fontTextSize[cfg.fontIndex]);
+  String t = formatDuration(timerSimpleRemaining);
+  int16_t x1, y1; uint16_t w, h;
+  display.getTextBounds(t, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2 - x1, (SCREEN_HEIGHT - h) / 2 - y1 + 4);
+  display.print(t);
+
+  display.setFont(nullptr);
+  display.setTextSize(1);
+  if (!timerSimpleRunning) {
+    display.setCursor(0, 56);
+    display.print("Turn=regler Btn=start");
+  } else {
+    display.setCursor(20, 56);
+    display.print("Btn=pause/stop");
+  }
+  display.display();
+}
+
+void updateTimerSimple()
+{
+  // Encodeur : régler la durée si pas en cours
+  static bool lastBtnTS = HIGH;
+  bool btnNow = digitalRead(BTN);
+
+  long pos   = -encoder.read() / 4;
+  int  delta = (int)(pos - lastEncoderPos);
+  if (delta != 0) {
+    lastEncoderPos = pos;
+    if (!timerSimpleRunning) {
+      timerSimpleMinutes = constrain(timerSimpleMinutes + delta, 1, 720);
+      timerSimpleRemaining = timerSimpleMinutes * 60;
+    }
+    drawTimerSimple();
+  }
+
+  // Bouton court : start/pause
+  if (lastBtnTS == HIGH && btnNow == LOW) {
+    delay(30);
+    if (digitalRead(BTN) == LOW) {
+      btnPressTime = millis();
+    }
+  }
+  if (lastBtnTS == LOW && btnNow == HIGH) {
+    unsigned long dur = millis() - btnPressTime;
+    if (dur < 800) {
+      if (!timerSimpleRunning && timerSimpleRemaining > 0) {
+        timerSimpleRunning = true;
+        timerSimpleLast    = millis();
+      } else {
+        timerSimpleRunning = false;
+      }
+      drawTimerSimple();
+    } else {
+      // Long = retour menu boot
+      timerSimpleRunning = false;
+      mode = MODE_BOOT_MENU;
+      encPosBootMenu = -encoder.read() / 4;
+      drawBootMenu();
+    }
+  }
+  lastBtnTS = btnNow;
+
+  // Décompte
+  if (timerSimpleRunning && millis() - timerSimpleLast >= 1000) {
+    timerSimpleLast = millis();
+    timerSimpleRemaining--;
+    if (timerSimpleRemaining <= 0) {
+      timerSimpleRemaining = 0;
+      timerSimpleRunning   = false;
+      // Fin : effet LEDs
+      runEndEffectAt(cfg.fxEnd, 0);
+      drawTimerSimple();
+      delay(3000);
+      timerSimpleRemaining = timerSimpleMinutes * 60;
+    }
+    drawTimerSimple();
+  }
+
+  // LEDs : barre de progression
+  if (timerSimpleRunning) {
+    int ledsOn = map(timerSimpleRemaining, 0, timerSimpleMinutes * 60, 0, LED_COUNT);
+    float pulse = getPulseFactor();
+    uint8_t r = ((cfg.colorWork >> 16) & 0xFF) * pulse;
+    uint8_t g = ((cfg.colorWork >>  8) & 0xFF) * pulse;
+    uint8_t b = ( cfg.colorWork        & 0xFF) * pulse;
+    for (int i = 0; i < LED_COUNT; i++)
+      strip.setPixelColor(i, i < ledsOn ? strip.Color(r, g, b) : 0);
+    strip.show();
+  }
+}
+
+// ======================
+// CHRONOMETRE
+// ======================
+void drawChrono()
+{
+  display.clearDisplay();
+  display.setFont(nullptr);
+  display.setTextSize(1);
+  display.setCursor(35, 0);
+  display.print("CHRONO");
+  if (chronoRunning) {
+    display.setCursor(95, 0);
+    display.print(">>>");
+  }
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+  // Temps écoulé
+  unsigned long elapsed = chronoRunning ?
+    chronoElapsed + (millis() - chronoStart) : chronoElapsed;
+
+  const GFXfont* fnt = getFont(cfg.fontIndex);
+  display.setFont(fnt);
+  display.setTextSize(fontTextSize[cfg.fontIndex]);
+  String t = formatDuration((int)(elapsed / 1000));
+  int16_t x1, y1; uint16_t w, h;
+  display.getTextBounds(t, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2 - x1, (SCREEN_HEIGHT - h) / 2 - y1 + 4);
+  display.print(t);
+
+  display.setFont(nullptr);
+  display.setTextSize(1);
+  display.setCursor(0, 56);
+  display.print("Btn=start/stop Long=reset");
+  display.display();
+}
+
+void updateChrono()
+{
+  static bool lastBtnChrono = HIGH;
+  bool btnNow = digitalRead(BTN);
+
+  // Mise à jour continue de l'affichage
+  if (chronoRunning) drawChrono();
+
+  // LEDs : arc-en-ciel rotatif pendant le chrono
+  if (chronoRunning) {
+    unsigned long age = chronoElapsed + (millis() - chronoStart);
+    uint8_t offset = (uint8_t)(age / 20);
+    for (int i = 0; i < LED_COUNT; i++)
+      strip.setPixelColor(i, wheel((i * 256 / LED_COUNT + offset) & 0xFF));
+    strip.show();
+  }
+
+  if (lastBtnChrono == HIGH && btnNow == LOW) {
+    btnPressTime = millis();
+  }
+  if (lastBtnChrono == LOW && btnNow == HIGH) {
+    unsigned long dur = millis() - btnPressTime;
+    if (dur < 800) {
+      if (!chronoRunning) {
+        chronoStart   = millis();
+        chronoRunning = true;
+      } else {
+        chronoElapsed += millis() - chronoStart;
+        chronoRunning  = false;
+        strip.clear(); strip.show();
+      }
+      drawChrono();
+    } else {
+      unsigned long holdStart = millis() - dur;
+      if (dur > 1500) {
+        // Très long = retour menu boot
+        chronoRunning = false; chronoElapsed = 0;
+        mode = MODE_BOOT_MENU;
+        encPosBootMenu = -encoder.read() / 4;
+        strip.clear(); strip.show();
+        drawBootMenu();
+      } else {
+        // Long = reset
+        chronoRunning = false;
+        chronoElapsed = 0;
+        strip.clear(); strip.show();
+        drawChrono();
+      }
+    }
+  }
+  lastBtnChrono = btnNow;
+}
+
+// ======================
+// MODE AMBIANCE
+// ======================
+void updateAmbiance()
+{
+  static bool lastBtnAmb = HIGH;
+  bool btnNow = digitalRead(BTN);
+  int  delta  = 0;
+
+  // Encodeur : changer d'effet
+  long pos = -encoder.read() / 4;
+  delta    = (int)(pos - lastEncoderPos);
+  if (delta != 0) {
+    lastEncoderPos = pos;
+    ambianceEffect = (ambianceEffect + delta + 3) % 3;
+    display.clearDisplay();
+    display.setFont(nullptr); display.setTextSize(1);
+    const char* names[] = { "Respiration", "Arc-en-ciel", "Comete" };
+    display.setCursor(20, 0); display.print("AMBIANCE");
+    display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+    display.setTextSize(2);
+    int16_t x1, y1; uint16_t w, h;
+    display.getTextBounds(names[ambianceEffect], 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2 - x1, 28);
+    display.print(names[ambianceEffect]);
+    display.setTextSize(1);
+    display.setCursor(10, 56); display.print("Turn=effet Long=quitter");
+    display.display();
+  }
+
+  // Animation LEDs
+  unsigned long t = millis();
+  switch (ambianceEffect) {
+    case 0: { // Respiration lente
+      float bri = (sin(t / 1500.0f) + 1.0f) / 2.0f;
+      uint8_t r = ((cfg.colorWork >> 16) & 0xFF) * bri;
+      uint8_t g = ((cfg.colorWork >>  8) & 0xFF) * bri;
+      uint8_t b = ( cfg.colorWork        & 0xFF) * bri;
+      for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, strip.Color(r, g, b));
+      strip.show(); break;
+    }
+    case 1: { // Arc-en-ciel
+      uint8_t offset = (uint8_t)(t / 15);
+      for (int i = 0; i < LED_COUNT; i++)
+        strip.setPixelColor(i, wheel((i * 256 / LED_COUNT + offset) & 0xFF));
+      strip.show(); break;
+    }
+    case 2: { // Comète
+      int cometLen = 4;
+      int head = (t / 60) % (LED_COUNT + cometLen);
+      strip.clear();
+      for (int i = 0; i < cometLen; i++) {
+        int idx = head - i;
+        if (idx >= 0 && idx < LED_COUNT) {
+          float fade = 1.0f - (float)i / cometLen;
+          uint8_t r = ((cfg.colorWork >> 16) & 0xFF) * fade;
+          uint8_t g = ((cfg.colorWork >>  8) & 0xFF) * fade;
+          uint8_t bv= ( cfg.colorWork        & 0xFF) * fade;
+          strip.setPixelColor(idx, strip.Color(r, g, bv));
+        }
+      }
+      strip.show(); break;
+    }
+  }
+
+  // Bouton long = retour menu boot
+  if (lastBtnAmb == HIGH && btnNow == LOW) btnPressTime = millis();
+  if (lastBtnAmb == LOW  && btnNow == HIGH) {
+    if (millis() - btnPressTime > 800) {
+      mode = MODE_BOOT_MENU;
+      encPosBootMenu = -encoder.read() / 4;
+      strip.clear(); strip.show();
+      drawBootMenu();
+    }
+  }
+  lastBtnAmb = btnNow;
+
+  // Affichage initial
+  static bool ambianceDrawn = false;
+  if (!ambianceDrawn) {
+    display.clearDisplay();
+    display.setFont(nullptr); display.setTextSize(1);
+    display.setCursor(20, 0); display.print("AMBIANCE");
+    display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+    display.setTextSize(2);
+    const char* names[] = { "Respiration", "Arc-en-ciel", "Comete" };
+    int16_t x1, y1; uint16_t w, h;
+    display.getTextBounds(names[ambianceEffect], 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2 - x1, 28);
+    display.print(names[ambianceEffect]);
+    display.setTextSize(1);
+    display.setCursor(10, 56); display.print("Turn=effet Long=quitter");
+    display.display();
+    ambianceDrawn = true;
+  }
+}
 
 void startWebServer()
 {
